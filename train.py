@@ -377,7 +377,7 @@ class MinesweeperEnv(Env):
             self.state.reveal(cell)
 
         if self.state.status != PLAYING:
-            reward = 1.0 if self.state.status == "WON" else -1.0
+            reward = 1.0 if self.state.status == WON else -1.0
             done = True
         else:
             reward = 0.0
@@ -399,11 +399,11 @@ class MinesweeperEnv(Env):
         )
     
 async def main():
-    MODEL_NAME = "openai/gpt-oss-20b"
-    RENDERER_NAME = "gpt_oss_high_reasoning"
-    GROUP_SIZE = 16
+    MODEL_NAME = "openai/gpt-oss-120b"
+    RENDERER_NAME = "gpt_oss_low_reasoning"
+    GROUP_SIZE = 4
     LORA_RANK = 32
-    MAX_TOKENS = 20000
+    MAX_TOKENS = 8000
 
     tokenizer = get_tokenizer(MODEL_NAME)
     renderer = renderers.get_renderer(RENDERER_NAME, tokenizer=tokenizer)
