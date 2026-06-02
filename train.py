@@ -387,7 +387,7 @@ class MinesweeperEnv(Env):
             "role": "tool",
             "name": tool_call.function.name,
             "content": self.state.render(),
-            "tool_call_id": tool_call.function.id
+            "tool_call_id": tool_call.id
         })
         next_obs = self.renderer.build_generation_prompt(self.messages)
 
