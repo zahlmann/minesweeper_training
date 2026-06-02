@@ -1,0 +1,8 @@
+[project]
+name = "minesweeper-training"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "tinker>=0.22.3",
+    "tinker-cookbook>=0.4.1",
+]
