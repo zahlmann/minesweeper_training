@@ -1,3 +1,5 @@
+import json
+import asyncio
 import random
 from collections import deque
 from collections.abc import Sequence
@@ -7,7 +9,12 @@ from typing import Any
 from datasets import Dataset
 from functools import partial
 
+import warnings
+
+warnings.filterwarnings("ignore", message="IProgress not found")
+
 import tinker
+from tinker import types
 
 from tinker_cookbook import renderers
 from tinker_cookbook.completers import TinkerTokenCompleter
@@ -21,6 +28,7 @@ from tinker_cookbook.rl.problem_env import ProblemGroupBuilder
 from tinker_cookbook.rl.rollouts import do_group_rollout
 from tinker_cookbook.rl.types import Env, EnvGroupBuilder, RLDataset, TrajectoryGroup, StepResult
 from tinker_cookbook.tokenizer_utils import get_tokenizer
+from tinker_cookbook.tool_use import ToolSpec
             
 
 Cell = tuple[int, int]
@@ -299,60 +307,89 @@ class Game:
         return 0 <= row < self.config.rows and 0 <= col < self.config.cols
 
 
-class MyEnv(Env):
+class MinesweeperEnv(Env):
     def __init__(self, renderer, rows=5, cols=5, mines=8):
         self.renderer = renderer
-        self.config = GameConfig(rows=rows, cols=cols, mines=mines)
-        self.state = Game()
+        self.config = GameConfig(rows=rows, cols=cols, mines=mines, seed=420)
+        self.state = Game(self.config)
+
+    async def get_state(self):
+        return self.state.render()
 
     async def initial_observation(self):
+        tools = self.renderer.create_conversation_prefix_with_tools([
+            ToolSpec(
+                name="reveal",
+                description="Reveal a cell in the Minesweeper grid.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "row": {"type": "integer"},
+                        "col": {"type": "integer"},
+                    },
+                    "required": ["row", "col"],
+                },
+            )
+        ])
         self.messages = [
+            *tools,
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": self.state.render()}
         ]
-        model_input, _ = self.renderer.build_generation_prompt(self.messages)
+        model_input = self.renderer.build_generation_prompt(self.messages)
         return model_input, self.renderer.get_stop_sequences()
 
     async def step(self, action, *, extra=None):
         fallback_negative_reward = StepResult(
                 reward=-1.0,
-                episode_done=done,
+                episode_done=True,
                 next_observation=tinker.ModelInput.from_ints([]),
                 next_stop_condition=[],
             )
 
         message, termination = self.renderer.parse_response(action)
-
+        print(message)
         if termination == "malformed":
             return fallback_negative_reward        
 
         self.messages.append(message)
-        for tool_call in message.tool_calls:
-            if tool_call.name != "reveal":
+        
+        if not message.get("tool_calls"):
+            return fallback_negative_reward
+
+        for tool_call in message["tool_calls"]:
+            if tool_call.function.name != "reveal":
                 return fallback_negative_reward
 
-            if not tool_call.arguments.get("row") or not tool_call.arguments.get("col"):
+            args = json.loads(tool_call.function.arguments)
+
+            if "row" not in args or "col" not in args:
                 return fallback_negative_reward
             
-            row = tool_call.arguments["row"]
-            col = tool_call.arguments["col"]
+            row = args["row"]
+            col = args["col"]
 
             try:
                 cell = (int(row), int(col))
             except ValueError:
                 return fallback_negative_reward
 
-            self.state = self.state.reveal(cell)
+            self.state.reveal(cell)
 
-        if self.state.status != "PLAYING":
+        if self.state.status != PLAYING:
             reward = 1.0 if self.state.status == "WON" else -1.0
             done = True
         else:
             reward = 0.0
             done = False
 
-        self.messages.append({"role": "tool", "content": self.state.render()})
-        next_obs, _ = self.renderer.build_generation_prompt(self.messages)
+        self.messages.append({
+            "role": "tool",
+            "name": tool_call.function.name,
+            "content": self.state.render(),
+            "tool_call_id": tool_call.function.id
+        })
+        next_obs = self.renderer.build_generation_prompt(self.messages)
 
         return StepResult(
             reward=reward,
@@ -360,3 +397,38 @@ class MyEnv(Env):
             next_observation=next_obs,
             next_stop_condition=self.renderer.get_stop_sequences(),
         )
+    
+async def main():
+    MODEL_NAME = "openai/gpt-oss-20b"
+    RENDERER_NAME = "gpt_oss_high_reasoning"
+    GROUP_SIZE = 16
+    LORA_RANK = 32
+    MAX_TOKENS = 20000
+
+    tokenizer = get_tokenizer(MODEL_NAME)
+    renderer = renderers.get_renderer(RENDERER_NAME, tokenizer=tokenizer)
+
+
+    service_client = tinker.ServiceClient()
+    training_client = await service_client.create_lora_training_client_async(
+        base_model=MODEL_NAME, rank=LORA_RANK
+    )
+    sampling_client = await training_client.save_weights_and_get_sampling_client_async()
+    policy = TinkerTokenCompleter(sampling_client, max_tokens=MAX_TOKENS, temperature=1.0)
+    group_builder = ProblemGroupBuilder(
+        env_thunk=partial(
+            MinesweeperEnv,
+            renderer,
+        ),
+        num_envs=GROUP_SIZE,
+    )
+    traj_group: TrajectoryGroup = await do_group_rollout(group_builder, policy)
+    rewards = traj_group.get_total_rewards()
+    print(f"Rewards per trajectory: {rewards}")
+    print(f"Number of trajectories: {len(traj_group.trajectories_G)}")
+    for i, (traj, reward) in enumerate(zip(traj_group.trajectories_G, rewards)):
+        n_tokens = sum(len(t.ac.tokens) for t in traj.transitions)
+        print(f"  Trajectory {i}: reward={reward:.1f}, response_tokens={n_tokens}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
