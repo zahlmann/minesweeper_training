@@ -39,7 +39,7 @@ WON = "won"
 LOST = "lost"
 TOOL_NAME = "play_minesweeper"
 
-SYSTEM_PROMPT = """Play Minesweeper by calling play_minesweeper.
+SYSTEM_PROMPT = """Play Minesweeper by calling reveal.
 
 Use one command per tool call:
 - reveal ROW COL
@@ -448,11 +448,11 @@ class MinesweeperEnv(Env):
         )
     
 async def main():
-    MODEL_NAME = "openai/gpt-oss-20b"
-    RENDERER_NAME = "gpt_oss_medium_reasoning"
-    GROUP_SIZE = 4
+    MODEL_NAME = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16:peft:262144"
+    RENDERER_NAME = "nemotron3"
+    GROUP_SIZE = 16
     LORA_RANK = 32
-    MAX_TOKENS = 8000
+    MAX_TOKENS = 20000
 
     tokenizer = get_tokenizer(MODEL_NAME)
     renderer = renderers.get_renderer(RENDERER_NAME, tokenizer=tokenizer)
