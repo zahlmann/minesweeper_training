@@ -17,6 +17,7 @@ import tinker
 from tinker import types
 
 from tinker_cookbook import renderers
+from tinker_cookbook.renderers.base import RenderContext
 from tinker_cookbook.completers import TinkerTokenCompleter
 from tinker_cookbook.hyperparam_utils import get_lr
 from tinker_cookbook.rl.data_processing import (
@@ -306,6 +307,40 @@ class Game:
         row, col = cell
         return 0 <= row < self.config.rows and 0 <= col < self.config.cols
 
+def chunk_tokens(chunks):
+    tokens = []
+    for chunk in chunks:
+        tokens.extend(chunk.tokens)
+    return tokens
+
+def last_user_index(messages):
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index]["role"] == "user":
+            return index
+    return -1
+
+def render_message_tokens(renderer, message, messages):
+    context = RenderContext(
+        idx=len(messages),
+        is_last=True,
+        prev_message=messages[-1] if messages else None,
+        last_user_index=last_user_index(messages)
+    )
+    rendered = renderer.render_message(message, context)
+    tokens = []
+    if rendered.header:
+        tokens.extend(rendered.header.tokens)
+    tokens.extend(chunk_tokens(rendered.output))
+    return tokens
+
+def render_assistant_header_tokens(renderer, messages):
+    context = RenderContext(
+        idx=len(messages),
+        is_last=True,
+        prev_message=messages[-1] if messages else None,
+        last_user_index=last_user_index(messages)
+    )
+    return renderer._get_generation_suffix("assistant", context)
 
 class MinesweeperEnv(Env):
     def __init__(self, renderer, rows=5, cols=5, mines=8):
@@ -336,8 +371,8 @@ class MinesweeperEnv(Env):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": self.state.render()}
         ]
-        model_input = self.renderer.build_generation_prompt(self.messages)
-        return model_input, self.renderer.get_stop_sequences()
+        self.model_input = self.renderer.build_generation_prompt(self.messages)
+        return self.model_input, self.renderer.get_stop_sequences()
 
     async def step(self, action, *, extra=None):
         fallback_negative_reward = StepResult(
@@ -353,6 +388,10 @@ class MinesweeperEnv(Env):
             return fallback_negative_reward        
 
         self.messages.append(message)
+
+        self.model_input = self.model_input.append(
+            tinker.EncodedTextChunk(tokens=list(action))
+        )
         
         if not message.get("tool_calls"):
             return fallback_negative_reward
@@ -376,31 +415,41 @@ class MinesweeperEnv(Env):
 
             self.state.reveal(cell)
 
+            tool_message = {
+                "role": "tool",
+                "name": tool_call.function.name,
+                "content": self.state.render(),
+                "tool_call_id": tool_call.id
+            }
+
+            tool_tokens = render_message_tokens(self.renderer, tool_message, self.messages)
+
+            self.messages.append(tool_message)
+
+
         if self.state.status != PLAYING:
-            reward = 1.0 if self.state.status == WON else -1.0
+            reward = 1.0 if self.state.status == "WON" else -1.0
             done = True
         else:
             reward = 0.0
             done = False
 
-        self.messages.append({
-            "role": "tool",
-            "name": tool_call.function.name,
-            "content": self.state.render(),
-            "tool_call_id": tool_call.id
-        })
-        next_obs = self.renderer.build_generation_prompt(self.messages)
+        assistant_header_tokens = render_assistant_header_tokens(self.renderer, self.messages)
+
+        self.model_input = self.model_input.append(
+            tinker.EncodedTextChunk(tokens=tool_tokens + assistant_header_tokens)
+        )
 
         return StepResult(
             reward=reward,
             episode_done=done,
-            next_observation=next_obs,
+            next_observation=self.model_input if not done else tinker.ModelInput.empty(),
             next_stop_condition=self.renderer.get_stop_sequences(),
         )
     
 async def main():
-    MODEL_NAME = "openai/gpt-oss-120b"
-    RENDERER_NAME = "gpt_oss_low_reasoning"
+    MODEL_NAME = "openai/gpt-oss-20b"
+    RENDERER_NAME = "gpt_oss_medium_reasoning"
     GROUP_SIZE = 4
     LORA_RANK = 32
     MAX_TOKENS = 8000
