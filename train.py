@@ -560,13 +560,13 @@ async def main():
             ttl_seconds=None,
         )
         save_result = await save_future.result_async()
-        print(f"saved training checkpoint: {save_result.path}")
+        print(f" saved training checkpoint: {save_result.path}")
         save_future = await training_client.save_weights_for_sampler_async(
             name=f"sampler_step_{step:06d}",
             ttl_seconds=None,
         )
         save_result = await save_future.result_async()
-        print(f"saved sampler checkpoint: {save_result.path}")
+        print(f" saved sampler checkpoint: {save_result.path}")
         
         training_checkpoint_path = save_result.path
         wandb_run.summary["latest_training_checkpoint"] = training_checkpoint_path
