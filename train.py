@@ -541,7 +541,7 @@ async def main():
             "max_tokens": MAX_TOKENS,
             "batch_size": BATCH_SIZE,
             "steps": STEPS,
-            "learning_rate": learning_rate,
+            "learning_rate": LEARNING_RATE,
         },
     )
 
