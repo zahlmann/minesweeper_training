@@ -517,7 +517,6 @@ async def main():
 
         traj_group_tasks = []
         for batch in range(BATCH_SIZE):
-            print(f" BATCH {batch}")
             group_builder = ProblemGroupBuilder(
                 env_thunk=partial(
                     MinesweeperEnv,
@@ -544,8 +543,7 @@ async def main():
         advantages = compute_advantages(traj_groups)
         print(f" Advantages: {advantages}")
         datums, metadata = assemble_training_data(traj_groups, advantages)
-        print(f"\n Generated {len(datums)} datums from {len(traj_groups)} groups")
-        print(f" This is how the datum meta looks: {metadata[0]}")
+        print(f" Generated {len(datums)} datums from {len(traj_groups)} groups")
         if datums:
             fwd_bwd_future = await training_client.forward_backward_async(
                 [remove_mask(d) for d in datums], loss_fn="importance_sampling"
@@ -555,7 +553,7 @@ async def main():
             await optim_future.result_async()
         all_rewards = [r for tg in traj_groups for r in tg.get_total_rewards()]
         mean_reward = sum(all_rewards) / len(all_rewards) if all_rewards else 0.0
-        print(f"Step {step}: mean_reward={mean_reward:.2f}, datums={len(datums)}")
+        print(f" Step {step}: mean_reward={mean_reward:.2f}, datums={len(datums)}")
 
         save_future = await training_client.save_state_async(
             name=f"step_{step:06d}",
