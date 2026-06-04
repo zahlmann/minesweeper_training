@@ -389,6 +389,8 @@ class MinesweeperEnv(Env):
 
         self.messages.append(message)
 
+        before = self.model_input.to_ints()
+
         self.model_input = self.model_input.append(
             tinker.EncodedTextChunk(tokens=list(action))
         )
@@ -439,6 +441,9 @@ class MinesweeperEnv(Env):
         self.model_input = self.model_input.append(
             tinker.EncodedTextChunk(tokens=tool_tokens + assistant_header_tokens)
         )
+
+        after = self.model_input.to_ints()
+        assert after[: len(before) + len(action)] == before + list(action)
 
         return StepResult(
             reward=reward,
