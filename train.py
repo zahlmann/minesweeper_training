@@ -307,7 +307,7 @@ class Game:
         row, col = cell
         return 0 <= row < self.config.rows and 0 <= col < self.config.cols
 
-def chunk_tokens(chunks):
+def flatten_chunk_tokens(chunks):
     tokens = []
     for chunk in chunks:
         tokens.extend(chunk.tokens)
@@ -330,7 +330,7 @@ def render_message_tokens(renderer, message, messages):
     tokens = []
     if rendered.header:
         tokens.extend(rendered.header.tokens)
-    tokens.extend(chunk_tokens(rendered.output))
+    tokens.extend(flatten_chunk_tokens(rendered.output))
     return tokens
 
 def render_assistant_header_tokens(renderer, messages):
@@ -428,7 +428,7 @@ class MinesweeperEnv(Env):
 
 
         if self.state.status != PLAYING:
-            reward = 1.0 if self.state.status == "WON" else -1.0
+            reward = 1.0 if self.state.status == WON else -1.0
             done = True
         else:
             reward = 0.0
@@ -448,11 +448,11 @@ class MinesweeperEnv(Env):
         )
     
 async def main():
-    MODEL_NAME = "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16:peft:262144"
-    RENDERER_NAME = "nemotron3"
-    GROUP_SIZE = 16
+    MODEL_NAME = "openai/gpt-oss-20b"
+    RENDERER_NAME = "gpt_oss_medium_reasoning"
+    GROUP_SIZE = 4
     LORA_RANK = 32
-    MAX_TOKENS = 20000
+    MAX_TOKENS = 8000
 
     tokenizer = get_tokenizer(MODEL_NAME)
     renderer = renderers.get_renderer(RENDERER_NAME, tokenizer=tokenizer)
