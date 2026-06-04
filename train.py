@@ -477,7 +477,7 @@ async def main():
     RENDERER_NAME = "gpt_oss_medium_reasoning"
     GROUP_SIZE = 8
     LORA_RANK = 32
-    MAX_TOKENS = 8000
+    MAX_TOKENS = 6000
     BATCH_SIZE = 128
     STEPS = 10
 
@@ -513,7 +513,7 @@ async def main():
         print(f"STEP {step}")
 
         sampling_client = await training_client.save_weights_and_get_sampling_client_async()
-        policy = TinkerTokenCompleter(sampling_client, max_tokens=MAX_TOKENS, temperature=1.0)
+        policy = TinkerTokenCompleter(sampling_client, max_tokens=MAX_TOKENS, temperature=1.0, context_window=32768)
 
         traj_group_tasks = []
         for batch in range(BATCH_SIZE):
@@ -526,9 +526,15 @@ async def main():
                 num_envs=GROUP_SIZE,
             )
             task = asyncio.create_task(do_group_rollout(group_builder, policy))
-            traj_group_tasks.append(task)   
+            traj_group_tasks.append(task)
 
-        traj_groups = list(await asyncio.gather(*traj_group_tasks))
+        results = await asyncio.gather(*traj_group_tasks, return_exceptions=True)
+
+        failed_results = [result for result in results if not isinstance(result, TrajectoryGroup)]
+        traj_groups = [result for result in results if isinstance(result, TrajectoryGroup)]
+
+        if failed_results:
+            print(f" Discarded {len(failed_results)} rollout groups with errors")
 
         rollout_traj_groups = traj_groups
         all_rewards = [
