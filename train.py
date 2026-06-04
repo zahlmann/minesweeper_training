@@ -488,7 +488,7 @@ async def main():
     RENDERER_NAME = "gpt_oss_medium_reasoning"
     GROUP_SIZE = 16
     LORA_RANK = 32
-    MAX_TOKENS = 6000
+    MAX_TOKENS = 4000
     BATCH_SIZE = 128
     STEPS = 10
 
@@ -558,7 +558,6 @@ async def main():
 
         traj_groups = remove_constant_reward_groups(rollout_traj_groups)
         advantages = compute_advantages(traj_groups)
-        print(f" Advantages: {advantages}")
         datums, metadata = assemble_training_data(traj_groups, advantages)
         print(f" Generated {len(datums)} datums from {len(traj_groups)} groups")
         if datums:
