@@ -383,7 +383,13 @@ class MinesweeperEnv(Env):
                 episode_done=True,
                 next_observation=tinker.ModelInput.empty(),
                 next_stop_condition=[],
-                metrics={"tool_calls": tool_calls},
+                metrics={
+                    "tool_calls": tool_calls,
+                    "bad_responses": 1,
+                    "invalid_moves": 0,
+                    "wins": 0,
+                    "losses": 0,
+                },
             )
 
         message, termination = self.renderer.parse_response(action)
@@ -404,6 +410,7 @@ class MinesweeperEnv(Env):
             return finish_with_reward(-1.0, len(tool_calls))
 
         reward = 0.0
+        invalid_moves = 0
         tool_response_tokens = []
         for tool_call in tool_calls:
             if tool_call.function.name != "reveal":
@@ -432,6 +439,7 @@ class MinesweeperEnv(Env):
             self.state.reveal(cell)
             if self.state.invalid_commands > invalid_commands_before:
                 reward += INVALID_MOVE_REWARD
+                invalid_moves += self.state.invalid_commands - invalid_commands_before
 
             tool_message = {
                 "role": "tool",
@@ -465,7 +473,13 @@ class MinesweeperEnv(Env):
             episode_done=done,
             next_observation=self.model_input if not done else tinker.ModelInput.empty(),
             next_stop_condition=self.renderer.get_stop_sequences(),
-            metrics={"tool_calls": len(tool_calls)}
+            metrics={
+                "tool_calls": len(tool_calls),
+                "bad_responses": 0,
+                "invalid_moves": invalid_moves,
+                "wins": int(done and self.state.status == WON),
+                "losses": int(done and self.state.status == LOST),
+            }
         )
     
 def remove_mask(datum: tinker.Datum) -> tinker.Datum:
@@ -476,12 +490,23 @@ def remove_mask(datum: tinker.Datum) -> tinker.Datum:
     )
 
 def count_tool_calls(traj_groups: list[TrajectoryGroup]) -> int:
+    return count_metric(traj_groups, "tool_calls")
+
+def count_metric(traj_groups: list[TrajectoryGroup], metric: str) -> int:
     return sum(
-        int(transition.metrics.get("tool_calls", 0))
+        int(transition.metrics.get(metric, 0))
         for traj_group in traj_groups
         for trajectory in traj_group.trajectories_G
         for transition in trajectory.transitions
     )
+
+def mean_reward(traj_groups: list[TrajectoryGroup]) -> float:
+    rewards = [
+        reward
+        for traj_group in traj_groups
+        for reward in traj_group.get_total_rewards()
+    ]
+    return sum(rewards) / len(rewards) if rewards else 0.0
 
 async def main():
     MODEL_NAME = "openai/gpt-oss-20b"
@@ -548,18 +573,25 @@ async def main():
             print(f" Discarded {len(failed_results)} rollout groups with errors")
 
         rollout_traj_groups = traj_groups
-        all_rewards = [
-            reward
-            for traj_group in rollout_traj_groups
-            for reward in traj_group.get_total_rewards()
-        ]
-        mean_reward = sum(all_rewards) / len(all_rewards) if all_rewards else 0.0
+        rollout_group_count = len(rollout_traj_groups)
+        rollout_mean_reward = mean_reward(rollout_traj_groups)
         tool_calls = count_tool_calls(rollout_traj_groups)
+        invalid_moves = count_metric(rollout_traj_groups, "invalid_moves")
+        wins = count_metric(rollout_traj_groups, "wins")
+        losses = count_metric(rollout_traj_groups, "losses")
+        bad_responses = count_metric(rollout_traj_groups, "bad_responses")
 
         traj_groups = remove_constant_reward_groups(rollout_traj_groups)
+        training_group_count = len(traj_groups)
+        filtered_group_count = rollout_group_count - training_group_count
+        training_mean_reward = mean_reward(traj_groups)
+
         advantages = compute_advantages(traj_groups)
         datums, metadata = assemble_training_data(traj_groups, advantages)
-        print(f" Generated {len(datums)} datums from {len(traj_groups)} groups")
+        print(
+            f" Generated {len(datums)} datums from {training_group_count} "
+            f" non-constant groups ({filtered_group_count} filtered)"
+        )
         if datums:
             fwd_bwd_future = await training_client.forward_backward_async(
                 [remove_mask(d) for d in datums], loss_fn="importance_sampling"
@@ -567,9 +599,10 @@ async def main():
             optim_future = await training_client.optim_step_async(adam_params)
             await fwd_bwd_future.result_async()
             await optim_future.result_async()
-        all_rewards = [r for tg in traj_groups for r in tg.get_total_rewards()]
-        mean_reward = sum(all_rewards) / len(all_rewards) if all_rewards else 0.0
-        print(f" Step {step}: mean_reward={mean_reward:.2f}, datums={len(datums)}")
+        print(
+            f" Step {step}: rollout_mean_reward={rollout_mean_reward:.2f}, "
+            f" training_mean_reward={training_mean_reward:.2f}, datums={len(datums)}"
+        )
 
         save_future = await training_client.save_state_async(
             name=f"step_{step:06d}",
@@ -591,9 +624,19 @@ async def main():
 
         wandb.log(
             {
-                "train/mean_reward": mean_reward,
+                "train/mean_reward": rollout_mean_reward,
+                "train/rollout_mean_reward": rollout_mean_reward,
+                "train/training_mean_reward": training_mean_reward,
                 "train/datums": len(datums),
+                "train/rollout_groups": rollout_group_count,
+                "train/nonconstant_groups": training_group_count,
+                "train/filtered_constant_groups": filtered_group_count,
+                "train/failed_groups": len(failed_results),
                 "train/tool_calls": tool_calls,
+                "train/invalid_moves": invalid_moves,
+                "train/wins": wins,
+                "train/losses": losses,
+                "train/bad_responses": bad_responses,
                 "checkpoints/training": training_checkpoint_path,
                 "checkpoints/sampler": sampler_checkpoint_path,
             },
