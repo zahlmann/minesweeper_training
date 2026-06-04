@@ -5,6 +5,7 @@ from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
+import wandb
 
 from datasets import Dataset
 from functools import partial
@@ -375,17 +376,20 @@ class MinesweeperEnv(Env):
         return self.model_input, self.renderer.get_stop_sequences()
 
     async def step(self, action, *, extra=None):
-        fallback_negative_reward = StepResult(
-                reward=-1.0,
+        def finish_with_reward(reward: float, tool_calls: int = 0) -> StepResult:
+            return StepResult(
+                reward=reward,
                 episode_done=True,
-                next_observation=tinker.ModelInput.from_ints([]),
+                next_observation=tinker.ModelInput.empty(),
                 next_stop_condition=[],
+                metrics={"tool_calls": tool_calls},
             )
 
         message, termination = self.renderer.parse_response(action)
-        print(message)
         if termination == "malformed":
-            return fallback_negative_reward        
+            return finish_with_reward(-1.0)      
+
+        tool_calls = message.get("tool_calls") or []
 
         self.messages.append(message)
 
@@ -395,17 +399,17 @@ class MinesweeperEnv(Env):
             tinker.EncodedTextChunk(tokens=list(action))
         )
         
-        if not message.get("tool_calls"):
-            return fallback_negative_reward
+        if not tool_calls:
+            return finish_with_reward(-1.0, len(tool_calls))
 
-        for tool_call in message["tool_calls"]:
+        for tool_call in tool_calls:
             if tool_call.function.name != "reveal":
-                return fallback_negative_reward
+                return finish_with_reward(-1.0, len(tool_calls))
 
             args = json.loads(tool_call.function.arguments)
 
             if "row" not in args or "col" not in args:
-                return fallback_negative_reward
+                return finish_with_reward(-1.0, len(tool_calls))
             
             row = args["row"]
             col = args["col"]
@@ -413,7 +417,7 @@ class MinesweeperEnv(Env):
             try:
                 cell = (int(row), int(col))
             except ValueError:
-                return fallback_negative_reward
+                return finish_with_reward(-1.0, len(tool_calls))
 
             self.state.reveal(cell)
 
@@ -450,6 +454,7 @@ class MinesweeperEnv(Env):
             episode_done=done,
             next_observation=self.model_input if not done else tinker.ModelInput.empty(),
             next_stop_condition=self.renderer.get_stop_sequences(),
+            metrics={"tool_calls": len(tool_calls)}
         )
     
 def remove_mask(datum: tinker.Datum) -> tinker.Datum:
@@ -457,6 +462,14 @@ def remove_mask(datum: tinker.Datum) -> tinker.Datum:
     return tinker.Datum(
         model_input=datum.model_input,
         loss_fn_inputs={k: v for k, v in datum.loss_fn_inputs.items() if k != "mask"},
+    )
+
+def count_tool_calls(traj_groups: list[TrajectoryGroup]) -> int:
+    return sum(
+        int(transition.metrics.get("tool_calls", 0))
+        for traj_group in traj_groups
+        for trajectory in traj_group.trajectories_G
+        for transition in trajectory.transitions
     )
 
 async def main():
@@ -471,12 +484,29 @@ async def main():
     tokenizer = get_tokenizer(MODEL_NAME)
     renderer = renderers.get_renderer(RENDERER_NAME, tokenizer=tokenizer)
 
-    learning_rate = get_lr(MODEL_NAME)
+    #learning_rate = get_lr(MODEL_NAME) # only works for llama and qwen
+    learning_rate = 1e-3
     adam_params = tinker.AdamParams(learning_rate=learning_rate, beta1=0.9, beta2=0.95, eps=1e-08)
 
     service_client = tinker.ServiceClient()
     training_client = await service_client.create_lora_training_client_async(
         base_model=MODEL_NAME, rank=LORA_RANK
+    )
+    tinker_run_id = str(training_client.model_id)
+    wandb_run = wandb.init(
+        project="minesweeper-training",
+        name=f"minesweeper-{tinker_run_id}",
+        config={
+            "tinker_run_id": tinker_run_id,
+            "model_name": MODEL_NAME,
+            "renderer_name": RENDERER_NAME,
+            "group_size": GROUP_SIZE,
+            "lora_rank": LORA_RANK,
+            "max_tokens": MAX_TOKENS,
+            "batch_size": BATCH_SIZE,
+            "steps": STEPS,
+            "learning_rate": learning_rate,
+        },
     )
 
     for step in range(STEPS):
@@ -501,7 +531,17 @@ async def main():
             rewards = traj_group.get_total_rewards()
             print(f"  Rewards per trajectory: {rewards}")
             print(f"  Number of trajectories: {len(traj_group.trajectories_G)}")
-        traj_groups = remove_constant_reward_groups(traj_groups)
+
+        rollout_traj_groups = traj_groups
+        all_rewards = [
+            reward
+            for traj_group in rollout_traj_groups
+            for reward in traj_group.get_total_rewards()
+        ]
+        mean_reward = sum(all_rewards) / len(all_rewards) if all_rewards else 0.0
+        tool_calls = count_tool_calls(rollout_traj_groups)
+
+        traj_groups = remove_constant_reward_groups(rollout_traj_groups)
         advantages = compute_advantages(traj_groups)
         print(f" Advantages: {advantages}")
         datums, metadata = assemble_training_data(traj_groups, advantages)
@@ -517,7 +557,37 @@ async def main():
         all_rewards = [r for tg in traj_groups for r in tg.get_total_rewards()]
         mean_reward = sum(all_rewards) / len(all_rewards) if all_rewards else 0.0
         print(f"Step {step}: mean_reward={mean_reward:.2f}, datums={len(datums)}")
+
+        save_future = await training_client.save_state_async(
+            name=f"step_{step:06d}",
+            ttl_seconds=None,
+        )
+        save_result = await save_future.result_async()
+        print(f"saved training checkpoint: {save_result.path}")
+        save_future = await training_client.save_weights_for_sampler_async(
+            name=f"sampler_step_{step:06d}",
+            ttl_seconds=None,
+        )
+        save_result = await save_future.result_async()
+        print(f"saved sampler checkpoint: {save_result.path}")
         
+        training_checkpoint_path = save_result.path
+        wandb_run.summary["latest_training_checkpoint"] = training_checkpoint_path
+
+        # after sampler save_result:
+        sampler_checkpoint_path = save_result.path
+        wandb_run.summary["latest_sampler_checkpoint"] = sampler_checkpoint_path
+
+        wandb.log(
+            {
+                "train/mean_reward": mean_reward,
+                "train/datums": len(datums),
+                "train/tool_calls": tool_calls,
+                "checkpoints/training": training_checkpoint_path,
+                "checkpoints/sampler": sampler_checkpoint_path,
+            },
+            step=step,
+        )
 
 if __name__ == "__main__":
     asyncio.run(main())
