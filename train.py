@@ -323,7 +323,7 @@ def render_message_tokens(renderer, message, messages):
     context = RenderContext(
         idx=len(messages),
         is_last=True,
-        prev_message=messages[-1] if messages else None,
+        prev_message=messages[-1],
         last_user_index=last_user_index(messages)
     )
     rendered = renderer.render_message(message, context)
@@ -337,7 +337,7 @@ def render_assistant_header_tokens(renderer, messages):
     context = RenderContext(
         idx=len(messages),
         is_last=True,
-        prev_message=messages[-1] if messages else None,
+        prev_message=messages[-1],
         last_user_index=last_user_index(messages)
     )
     return renderer._get_generation_suffix("assistant", context)
