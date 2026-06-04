@@ -2,12 +2,9 @@ import json
 import asyncio
 import random
 from collections import deque
-from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
 import wandb
 
-from datasets import Dataset
 from functools import partial
 
 import warnings
@@ -15,7 +12,6 @@ import warnings
 warnings.filterwarnings("ignore", message="IProgress not found")
 
 import tinker
-from tinker import types
 
 from tinker_cookbook import renderers
 from tinker_cookbook.renderers.base import RenderContext
@@ -28,7 +24,7 @@ from tinker_cookbook.rl.data_processing import (
 )
 from tinker_cookbook.rl.problem_env import ProblemGroupBuilder
 from tinker_cookbook.rl.rollouts import do_group_rollout
-from tinker_cookbook.rl.types import Env, EnvGroupBuilder, RLDataset, TrajectoryGroup, StepResult
+from tinker_cookbook.rl.types import Env, TrajectoryGroup, StepResult
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.tool_use import ToolSpec
             
