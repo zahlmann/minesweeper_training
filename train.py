@@ -39,6 +39,7 @@ PLAYING = "playing"
 WON = "won"
 LOST = "lost"
 TOOL_NAME = "play_minesweeper"
+INVALID_MOVE_REWARD = -0.1
 
 SYSTEM_PROMPT = """Play Minesweeper by calling reveal.
 
@@ -402,11 +403,19 @@ class MinesweeperEnv(Env):
         if not tool_calls:
             return finish_with_reward(-1.0, len(tool_calls))
 
+        reward = 0.0
+        tool_response_tokens = []
         for tool_call in tool_calls:
             if tool_call.function.name != "reveal":
                 return finish_with_reward(-1.0, len(tool_calls))
 
-            args = json.loads(tool_call.function.arguments)
+            try:
+                args = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError:
+                return finish_with_reward(-1.0, len(tool_calls))
+
+            if not isinstance(args, dict):
+                return finish_with_reward(-1.0, len(tool_calls))
 
             if "row" not in args or "col" not in args:
                 return finish_with_reward(-1.0, len(tool_calls))
@@ -416,10 +425,13 @@ class MinesweeperEnv(Env):
 
             try:
                 cell = (int(row), int(col))
-            except ValueError:
+            except (TypeError, ValueError):
                 return finish_with_reward(-1.0, len(tool_calls))
 
+            invalid_commands_before = self.state.invalid_commands
             self.state.reveal(cell)
+            if self.state.invalid_commands > invalid_commands_before:
+                reward += INVALID_MOVE_REWARD
 
             tool_message = {
                 "role": "tool",
@@ -429,21 +441,20 @@ class MinesweeperEnv(Env):
             }
 
             tool_tokens = render_message_tokens(self.renderer, tool_message, self.messages)
-
+            tool_response_tokens.extend(tool_tokens)
             self.messages.append(tool_message)
 
 
         if self.state.status != PLAYING:
-            reward = 1.0 if self.state.status == WON else -1.0
+            reward += 1.0 if self.state.status == WON else -1.0
             done = True
         else:
-            reward = 0.0
             done = False
 
         assistant_header_tokens = render_assistant_header_tokens(self.renderer, self.messages)
 
         self.model_input = self.model_input.append(
-            tinker.EncodedTextChunk(tokens=tool_tokens + assistant_header_tokens)
+            tinker.EncodedTextChunk(tokens=tool_response_tokens + assistant_header_tokens)
         )
 
         after = self.model_input.to_ints()
@@ -475,7 +486,7 @@ def count_tool_calls(traj_groups: list[TrajectoryGroup]) -> int:
 async def main():
     MODEL_NAME = "openai/gpt-oss-20b"
     RENDERER_NAME = "gpt_oss_medium_reasoning"
-    GROUP_SIZE = 8
+    GROUP_SIZE = 16
     LORA_RANK = 32
     MAX_TOKENS = 6000
     BATCH_SIZE = 128
@@ -521,7 +532,7 @@ async def main():
                 env_thunk=partial(
                     MinesweeperEnv,
                     renderer,
-                    seed=step*batch
+                    seed=step * BATCH_SIZE + batch,
                 ),
                 num_envs=GROUP_SIZE,
             )
@@ -565,21 +576,19 @@ async def main():
             name=f"step_{step:06d}",
             ttl_seconds=None,
         )
-        save_result = await save_future.result_async()
-        print(f" saved training checkpoint: {save_result.path}")
+        training_save_result = await save_future.result_async()
+        training_checkpoint_path = training_save_result.path
+        wandb_run.summary["latest_training_checkpoint"] = training_checkpoint_path
+        print(f" saved training checkpoint: {training_checkpoint_path}")
+
         save_future = await training_client.save_weights_for_sampler_async(
             name=f"sampler_step_{step:06d}",
             ttl_seconds=None,
         )
-        save_result = await save_future.result_async()
-        print(f" saved sampler checkpoint: {save_result.path}")
-        
-        training_checkpoint_path = save_result.path
-        wandb_run.summary["latest_training_checkpoint"] = training_checkpoint_path
-
-        # after sampler save_result:
-        sampler_checkpoint_path = save_result.path
+        sampler_save_result = await save_future.result_async()
+        sampler_checkpoint_path = sampler_save_result.path
         wandb_run.summary["latest_sampler_checkpoint"] = sampler_checkpoint_path
+        print(f" saved sampler checkpoint: {sampler_checkpoint_path}")
 
         wandb.log(
             {
