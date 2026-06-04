@@ -478,8 +478,8 @@ async def main():
     GROUP_SIZE = 8
     LORA_RANK = 32
     MAX_TOKENS = 8000
-    BATCH_SIZE = 1
-    STEPS = 1
+    BATCH_SIZE = 128
+    STEPS = 10
 
     tokenizer = get_tokenizer(MODEL_NAME)
     renderer = renderers.get_renderer(RENDERER_NAME, tokenizer=tokenizer)
@@ -515,7 +515,7 @@ async def main():
         sampling_client = await training_client.save_weights_and_get_sampling_client_async()
         policy = TinkerTokenCompleter(sampling_client, max_tokens=MAX_TOKENS, temperature=1.0)
 
-        traj_groups = []
+        traj_group_tasks = []
         for batch in range(BATCH_SIZE):
             print(f" BATCH {batch}")
             group_builder = ProblemGroupBuilder(
@@ -526,11 +526,10 @@ async def main():
                 ),
                 num_envs=GROUP_SIZE,
             )
-            traj_group: TrajectoryGroup = await do_group_rollout(group_builder, policy)
-            traj_groups.append(traj_group)
-            rewards = traj_group.get_total_rewards()
-            print(f"  Rewards per trajectory: {rewards}")
-            print(f"  Number of trajectories: {len(traj_group.trajectories_G)}")
+            task = asyncio.create_task(do_group_rollout(group_builder, policy))
+            traj_group_tasks.append(task)   
+
+        traj_groups = list(await asyncio.gather(*traj_group_tasks))
 
         rollout_traj_groups = traj_groups
         all_rewards = [
