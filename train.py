@@ -516,13 +516,13 @@ async def main():
     MAX_TOKENS = 4000
     BATCH_SIZE = 128
     STEPS = 10
+    LEARNING_RATE = 1e-4
 
     tokenizer = get_tokenizer(MODEL_NAME)
     renderer = renderers.get_renderer(RENDERER_NAME, tokenizer=tokenizer)
 
     #learning_rate = get_lr(MODEL_NAME) # only works for llama and qwen
-    learning_rate = 1e-3
-    adam_params = tinker.AdamParams(learning_rate=learning_rate, beta1=0.9, beta2=0.95, eps=1e-08)
+    adam_params = tinker.AdamParams(learning_rate=LEARNING_RATE, beta1=0.9, beta2=0.95, eps=1e-08)
 
     service_client = tinker.ServiceClient()
     training_client = await service_client.create_lora_training_client_async(
