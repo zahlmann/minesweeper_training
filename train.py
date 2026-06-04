@@ -588,6 +588,7 @@ async def main():
             },
             step=step,
         )
+    wandb.finish()
 
 if __name__ == "__main__":
     asyncio.run(main())
