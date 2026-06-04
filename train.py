@@ -343,9 +343,9 @@ def render_assistant_header_tokens(renderer, messages):
     return renderer._get_generation_suffix("assistant", context)
 
 class MinesweeperEnv(Env):
-    def __init__(self, renderer, rows=5, cols=5, mines=8):
+    def __init__(self, renderer, rows=5, cols=5, mines=8, seed=420):
         self.renderer = renderer
-        self.config = GameConfig(rows=rows, cols=cols, mines=mines, seed=420)
+        self.config = GameConfig(rows=rows, cols=cols, mines=mines, seed=seed)
         self.state = Game(self.config)
 
     async def get_state(self):
@@ -452,37 +452,72 @@ class MinesweeperEnv(Env):
             next_stop_condition=self.renderer.get_stop_sequences(),
         )
     
+def remove_mask(datum: tinker.Datum) -> tinker.Datum:
+    """Remove the 'mask' key from loss_fn_inputs before sending to the server."""
+    return tinker.Datum(
+        model_input=datum.model_input,
+        loss_fn_inputs={k: v for k, v in datum.loss_fn_inputs.items() if k != "mask"},
+    )
+
 async def main():
     MODEL_NAME = "openai/gpt-oss-20b"
     RENDERER_NAME = "gpt_oss_medium_reasoning"
-    GROUP_SIZE = 4
+    GROUP_SIZE = 8
     LORA_RANK = 32
     MAX_TOKENS = 8000
+    BATCH_SIZE = 1
+    STEPS = 1
 
     tokenizer = get_tokenizer(MODEL_NAME)
     renderer = renderers.get_renderer(RENDERER_NAME, tokenizer=tokenizer)
 
+    learning_rate = get_lr(MODEL_NAME)
+    adam_params = tinker.AdamParams(learning_rate=learning_rate, beta1=0.9, beta2=0.95, eps=1e-08)
 
     service_client = tinker.ServiceClient()
     training_client = await service_client.create_lora_training_client_async(
         base_model=MODEL_NAME, rank=LORA_RANK
     )
-    sampling_client = await training_client.save_weights_and_get_sampling_client_async()
-    policy = TinkerTokenCompleter(sampling_client, max_tokens=MAX_TOKENS, temperature=1.0)
-    group_builder = ProblemGroupBuilder(
-        env_thunk=partial(
-            MinesweeperEnv,
-            renderer,
-        ),
-        num_envs=GROUP_SIZE,
-    )
-    traj_group: TrajectoryGroup = await do_group_rollout(group_builder, policy)
-    rewards = traj_group.get_total_rewards()
-    print(f"Rewards per trajectory: {rewards}")
-    print(f"Number of trajectories: {len(traj_group.trajectories_G)}")
-    for i, (traj, reward) in enumerate(zip(traj_group.trajectories_G, rewards)):
-        n_tokens = sum(len(t.ac.tokens) for t in traj.transitions)
-        print(f"  Trajectory {i}: reward={reward:.1f}, response_tokens={n_tokens}")
+
+    for step in range(STEPS):
+        print(f"STEP {step}")
+
+        sampling_client = await training_client.save_weights_and_get_sampling_client_async()
+        policy = TinkerTokenCompleter(sampling_client, max_tokens=MAX_TOKENS, temperature=1.0)
+
+        traj_groups = []
+        for batch in range(BATCH_SIZE):
+            print(f" BATCH {batch}")
+            group_builder = ProblemGroupBuilder(
+                env_thunk=partial(
+                    MinesweeperEnv,
+                    renderer,
+                    seed=step*batch
+                ),
+                num_envs=GROUP_SIZE,
+            )
+            traj_group: TrajectoryGroup = await do_group_rollout(group_builder, policy)
+            traj_groups.append(traj_group)
+            rewards = traj_group.get_total_rewards()
+            print(f"  Rewards per trajectory: {rewards}")
+            print(f"  Number of trajectories: {len(traj_group.trajectories_G)}")
+        traj_groups = remove_constant_reward_groups(traj_groups)
+        advantages = compute_advantages(traj_groups)
+        print(f" Advantages: {advantages}")
+        datums, metadata = assemble_training_data(traj_groups, advantages)
+        print(f"\n Generated {len(datums)} datums from {len(traj_groups)} groups")
+        print(f" This is how the datum meta looks: {metadata[0]}")
+        if datums:
+            fwd_bwd_future = await training_client.forward_backward_async(
+                [remove_mask(d) for d in datums], loss_fn="importance_sampling"
+            )
+            optim_future = await training_client.optim_step_async(adam_params)
+            await fwd_bwd_future.result_async()
+            await optim_future.result_async()
+        all_rewards = [r for tg in traj_groups for r in tg.get_total_rewards()]
+        mean_reward = sum(all_rewards) / len(all_rewards) if all_rewards else 0.0
+        print(f"Step {step}: mean_reward={mean_reward:.2f}, datums={len(datums)}")
+        
 
 if __name__ == "__main__":
     asyncio.run(main())
