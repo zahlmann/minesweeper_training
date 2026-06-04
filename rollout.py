@@ -2,35 +2,22 @@ import json
 import asyncio
 import random
 from collections import deque
-from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
-
-from datasets import Dataset
-from functools import partial
 
 import warnings
 
 warnings.filterwarnings("ignore", message="IProgress not found")
 
 import tinker
-from tinker import types
 
 from tinker_cookbook import renderers
 from tinker_cookbook.renderers.base import RenderContext
 from tinker_cookbook.completers import TinkerTokenCompleter
-from tinker_cookbook.hyperparam_utils import get_lr
-from tinker_cookbook.rl.data_processing import (
-    assemble_training_data,
-    compute_advantages,
-    remove_constant_reward_groups,
-)
-from tinker_cookbook.rl.problem_env import ProblemGroupBuilder
-from tinker_cookbook.rl.rollouts import do_group_rollout
-from tinker_cookbook.rl.types import Env, EnvGroupBuilder, RLDataset, TrajectoryGroup, StepResult
+from tinker_cookbook.rl.rollouts import do_single_rollout
+from tinker_cookbook.rl.types import Env, StepResult, Trajectory
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.tool_use import ToolSpec
-            
+
 
 Cell = tuple[int, int]
 
@@ -38,6 +25,7 @@ PLAYING = "playing"
 WON = "won"
 LOST = "lost"
 TOOL_NAME = "play_minesweeper"
+INVALID_MOVE_REWARD = -0.1
 
 SYSTEM_PROMPT = """Play Minesweeper by calling reveal.
 
@@ -343,9 +331,9 @@ def render_assistant_header_tokens(renderer, messages):
     return renderer._get_generation_suffix("assistant", context)
 
 class MinesweeperEnv(Env):
-    def __init__(self, renderer, rows=5, cols=5, mines=8):
+    def __init__(self, renderer, rows=5, cols=5, mines=8, seed=420):
         self.renderer = renderer
-        self.config = GameConfig(rows=rows, cols=cols, mines=mines, seed=420)
+        self.config = GameConfig(rows=rows, cols=cols, mines=mines, seed=seed)
         self.state = Game(self.config)
 
     async def get_state(self):
@@ -375,17 +363,26 @@ class MinesweeperEnv(Env):
         return self.model_input, self.renderer.get_stop_sequences()
 
     async def step(self, action, *, extra=None):
-        fallback_negative_reward = StepResult(
-                reward=-1.0,
+        def finish_with_reward(reward: float, tool_calls: int = 0) -> StepResult:
+            return StepResult(
+                reward=reward,
                 episode_done=True,
-                next_observation=tinker.ModelInput.from_ints([]),
+                next_observation=tinker.ModelInput.empty(),
                 next_stop_condition=[],
+                metrics={
+                    "tool_calls": tool_calls,
+                    "bad_responses": 1,
+                    "invalid_moves": 0,
+                    "wins": 0,
+                    "losses": 0,
+                },
             )
 
         message, termination = self.renderer.parse_response(action)
-        print(message)
         if termination == "malformed":
-            return fallback_negative_reward        
+            return finish_with_reward(-1.0)
+
+        tool_calls = message.get("tool_calls") or []
 
         self.messages.append(message)
 
@@ -394,52 +391,64 @@ class MinesweeperEnv(Env):
         self.model_input = self.model_input.append(
             tinker.EncodedTextChunk(tokens=list(action))
         )
-        
-        if not message.get("tool_calls"):
-            return fallback_negative_reward
 
-        for tool_call in message["tool_calls"]:
+        if not tool_calls:
+            return finish_with_reward(-1.0, len(tool_calls))
+
+        reward = 0.0
+        invalid_moves = 0
+        tool_response_tokens = []
+        for tool_call in tool_calls:
             if tool_call.function.name != "reveal":
-                return fallback_negative_reward
+                return finish_with_reward(-1.0, len(tool_calls))
 
-            args = json.loads(tool_call.function.arguments)
+            try:
+                args = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError:
+                return finish_with_reward(-1.0, len(tool_calls))
+
+            if not isinstance(args, dict):
+                return finish_with_reward(-1.0, len(tool_calls))
 
             if "row" not in args or "col" not in args:
-                return fallback_negative_reward
-            
+                return finish_with_reward(-1.0, len(tool_calls))
+
             row = args["row"]
             col = args["col"]
 
             try:
                 cell = (int(row), int(col))
-            except ValueError:
-                return fallback_negative_reward
+            except (TypeError, ValueError):
+                return finish_with_reward(-1.0, len(tool_calls))
 
+            invalid_commands_before = self.state.invalid_commands
             self.state.reveal(cell)
+            if self.state.invalid_commands > invalid_commands_before:
+                reward += INVALID_MOVE_REWARD
+                invalid_moves += self.state.invalid_commands - invalid_commands_before
 
             tool_message = {
                 "role": "tool",
                 "name": tool_call.function.name,
                 "content": self.state.render(),
-                "tool_call_id": tool_call.id
+                "tool_call_id": tool_call.id,
             }
 
             tool_tokens = render_message_tokens(self.renderer, tool_message, self.messages)
-
+            tool_response_tokens.extend(tool_tokens)
             self.messages.append(tool_message)
 
 
         if self.state.status != PLAYING:
-            reward = 1.0 if self.state.status == WON else -1.0
+            reward += 1.0 if self.state.status == WON else -1.0
             done = True
         else:
-            reward = 0.0
             done = False
 
         assistant_header_tokens = render_assistant_header_tokens(self.renderer, self.messages)
 
         self.model_input = self.model_input.append(
-            tinker.EncodedTextChunk(tokens=tool_tokens + assistant_header_tokens)
+            tinker.EncodedTextChunk(tokens=tool_response_tokens + assistant_header_tokens)
         )
 
         after = self.model_input.to_ints()
@@ -450,39 +459,96 @@ class MinesweeperEnv(Env):
             episode_done=done,
             next_observation=self.model_input if not done else tinker.ModelInput.empty(),
             next_stop_condition=self.renderer.get_stop_sequences(),
+            metrics={
+                "tool_calls": len(tool_calls),
+                "bad_responses": 0,
+                "invalid_moves": invalid_moves,
+                "wins": int(done and self.state.status == WON),
+                "losses": int(done and self.state.status == LOST),
+            },
         )
-    
+
+
+def trajectory_reward(trajectory: Trajectory) -> float:
+    return sum(transition.reward for transition in trajectory.transitions)
+
+
+def count_metric(trajectories: list[Trajectory], metric: str) -> int:
+    return sum(
+        int(transition.metrics.get(metric, 0))
+        for trajectory in trajectories
+        for transition in trajectory.transitions
+    )
+
+
+async def run_rollout(rollout_id: int, renderer, policy) -> Trajectory:
+    env = MinesweeperEnv(renderer, seed=rollout_id)
+    return await do_single_rollout(policy, env)
+
+
 async def main():
+    SAMPLER_CHECKPOINT_PATH = (
+        "tinker://b591491a-89d0-5750-a204-c74dc8058da1:train:0"
+        "/sampler_weights/sampler_step_000009"
+    )
     MODEL_NAME = "openai/gpt-oss-20b"
     RENDERER_NAME = "gpt_oss_medium_reasoning"
-    GROUP_SIZE = 4
-    LORA_RANK = 32
+    NUM_ROLLOUTS = 32
     MAX_TOKENS = 8000
+    FAILED_ROLLOUT_REWARD = -1.0
 
     tokenizer = get_tokenizer(MODEL_NAME)
     renderer = renderers.get_renderer(RENDERER_NAME, tokenizer=tokenizer)
 
-
     service_client = tinker.ServiceClient()
-    training_client = await service_client.create_lora_training_client_async(
-        base_model=MODEL_NAME, rank=LORA_RANK
+    sampling_client = await service_client.create_sampling_client_async(
+        model_path=SAMPLER_CHECKPOINT_PATH,
+        base_model=MODEL_NAME,
     )
-    sampling_client = await training_client.save_weights_and_get_sampling_client_async()
-    policy = TinkerTokenCompleter(sampling_client, max_tokens=MAX_TOKENS, temperature=1.0)
-    group_builder = ProblemGroupBuilder(
-        env_thunk=partial(
-            MinesweeperEnv,
-            renderer,
-        ),
-        num_envs=GROUP_SIZE,
+    policy = TinkerTokenCompleter(
+        sampling_client,
+        max_tokens=MAX_TOKENS,
+        temperature=1.0,
+        context_window=32768,
     )
-    traj_group: TrajectoryGroup = await do_group_rollout(group_builder, policy)
-    rewards = traj_group.get_total_rewards()
-    print(f"Rewards per trajectory: {rewards}")
-    print(f"Number of trajectories: {len(traj_group.trajectories_G)}")
-    for i, (traj, reward) in enumerate(zip(traj_group.trajectories_G, rewards)):
-        n_tokens = sum(len(t.ac.tokens) for t in traj.transitions)
-        print(f"  Trajectory {i}: reward={reward:.1f}, response_tokens={n_tokens}")
+
+    results = await asyncio.gather(
+        *(run_rollout(i, renderer, policy) for i in range(NUM_ROLLOUTS)),
+        return_exceptions=True,
+    )
+
+    rewards = []
+    trajectories = []
+    failures = 0
+    for result in results:
+        if isinstance(result, BaseException):
+            rewards.append(FAILED_ROLLOUT_REWARD)
+            failures += 1
+            continue
+
+        trajectories.append(result)
+        rewards.append(trajectory_reward(result))
+
+    mean_reward = sum(rewards) / len(rewards) if rewards else 0.0
+    print(f"Rewards per rollout: {rewards}")
+    print(f"Mean reward: {mean_reward:.3f}")
+    print(f"Completed rollouts: {NUM_ROLLOUTS - failures}/{NUM_ROLLOUTS}")
+    print(f"Tool calls: {count_metric(trajectories, 'tool_calls')}")
+    print(f"Invalid moves: {count_metric(trajectories, 'invalid_moves')}")
+    print(f"Wins: {count_metric(trajectories, 'wins')}")
+    print(f"Losses: {count_metric(trajectories, 'losses')}")
+    print(f"Bad responses: {count_metric(trajectories, 'bad_responses')}")
+
+    for i, result in enumerate(results):
+        if isinstance(result, BaseException):
+            print(
+                f"  Rollout {i}: reward={FAILED_ROLLOUT_REWARD:.1f}, "
+                f"error={type(result).__name__}: {result}"
+            )
+            continue
+
+        n_tokens = sum(len(t.ac.tokens) for t in result.transitions)
+        print(f"  Rollout {i}: reward={rewards[i]:.1f}, response_tokens={n_tokens}")
 
 if __name__ == "__main__":
     asyncio.run(main())
