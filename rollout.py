@@ -331,7 +331,14 @@ def render_assistant_header_tokens(renderer, messages):
     return renderer._get_generation_suffix("assistant", context)
 
 class MinesweeperEnv(Env):
-    def __init__(self, renderer, rows=5, cols=5, mines=8, seed=420):
+    def __init__(
+        self,
+        renderer,
+        rows=8,
+        cols=8,
+        mines=10,
+        seed=420,
+    ):
         self.renderer = renderer
         self.config = GameConfig(rows=rows, cols=cols, mines=mines, seed=seed)
         self.state = Game(self.config)
@@ -481,8 +488,21 @@ def count_metric(trajectories: list[Trajectory], metric: str) -> int:
     )
 
 
-async def run_rollout(rollout_id: int, renderer, policy) -> Trajectory:
-    env = MinesweeperEnv(renderer, seed=rollout_id)
+async def run_rollout(
+    rollout_id: int,
+    renderer,
+    policy,
+    rows: int,
+    cols: int,
+    mines: int,
+) -> Trajectory:
+    env = MinesweeperEnv(
+        renderer,
+        rows=rows,
+        cols=cols,
+        mines=mines,
+        seed=rollout_id,
+    )
     return await do_single_rollout(policy, env)
 
 
@@ -496,6 +516,9 @@ async def main():
     NUM_ROLLOUTS = 32
     MAX_TOKENS = 8000
     FAILED_ROLLOUT_REWARD = -1.0
+    ROWS = 10
+    COLS = 10
+    MINES = 12
 
     tokenizer = get_tokenizer(MODEL_NAME)
     renderer = renderers.get_renderer(RENDERER_NAME, tokenizer=tokenizer)
@@ -512,10 +535,11 @@ async def main():
         context_window=32768,
     )
 
-    results = await asyncio.gather(
-        *(run_rollout(i, renderer, policy) for i in range(NUM_ROLLOUTS)),
-        return_exceptions=True,
-    )
+    rollout_tasks = [
+        run_rollout(i, renderer, policy, rows=ROWS, cols=COLS, mines=MINES)
+        for i in range(NUM_ROLLOUTS)
+    ]
+    results = await asyncio.gather(*rollout_tasks, return_exceptions=True)
 
     rewards = []
     trajectories = []
