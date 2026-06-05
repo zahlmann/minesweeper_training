@@ -14,7 +14,7 @@ warnings.filterwarnings("ignore", message="IProgress not found")
 import tinker
 
 from tinker_cookbook import renderers
-from tinker_cookbook.renderers.base import RenderContext
+from tinker_cookbook.renderers.base import RenderContext, ToolCall
 from tinker_cookbook.completers import TinkerTokenCompleter
 from tinker_cookbook.hyperparam_utils import get_lr
 from tinker_cookbook.rl.data_processing import (
@@ -340,11 +340,45 @@ def render_assistant_header_tokens(renderer, messages):
     )
     return renderer._get_generation_suffix("assistant", context)
 
+def make_opening_reveal_messages(state: Game, opening_cell: Cell) -> list[dict]:
+    row, col = opening_cell
+    arguments = json.dumps({"row": row, "col": col})
+    thinking = f"The first reveal is safe. I will reveal row {row}, col {col}."
+    tool_call = ToolCall(
+        id=None,
+        function=ToolCall.FunctionBody(name="reveal", arguments=arguments),
+    )
+
+    state.reveal(opening_cell)
+
+    return [
+        {
+            "role": "assistant",
+            "content": [{"type": "thinking", "thinking": thinking}],
+            "tool_calls": [tool_call],
+        },
+        {
+            "role": "tool",
+            "name": "reveal",
+            "content": state.render(),
+            "tool_call_id": tool_call.id,
+        },
+    ]
+
 class MinesweeperEnv(Env):
-    def __init__(self, renderer, rows=5, cols=5, mines=8, seed=420):
+    def __init__(
+        self,
+        renderer,
+        rows=5,
+        cols=5,
+        mines=8,
+        seed=420,
+        opening_cell: Cell | None = None,
+    ):
         self.renderer = renderer
         self.config = GameConfig(rows=rows, cols=cols, mines=mines, seed=seed)
         self.state = Game(self.config)
+        self.opening_cell = opening_cell
 
     async def get_state(self):
         return self.state.render()
@@ -369,6 +403,10 @@ class MinesweeperEnv(Env):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": self.state.render()}
         ]
+        if self.opening_cell is not None:
+            self.messages.extend(
+                make_opening_reveal_messages(self.state, self.opening_cell)
+            )
         self.model_input = self.renderer.build_generation_prompt(self.messages)
         return self.model_input, self.renderer.get_stop_sequences()
 
@@ -505,14 +543,22 @@ def mean_reward(traj_groups: list[TrajectoryGroup]) -> float:
     return sum(rewards) / len(rewards) if rewards else 0.0
 
 async def main():
+    TRAINING_CHECKPOINT_PATH = (
+        "tinker://b591491a-89d0-5750-a204-c74dc8058da1:train:0"
+        "/weights/step_000009"
+    )
     MODEL_NAME = "openai/gpt-oss-20b"
     RENDERER_NAME = "gpt_oss_medium_reasoning"
     GROUP_SIZE = 16
     LORA_RANK = 32
     MAX_TOKENS = 4000
     BATCH_SIZE = 128
-    STEPS = 10
+    START_STEP = 10
+    STEPS = 6
     LEARNING_RATE = 1e-4
+    ROWS = 10
+    COLS = 10
+    MINES = 12
 
     tokenizer = get_tokenizer(MODEL_NAME)
     renderer = renderers.get_renderer(RENDERER_NAME, tokenizer=tokenizer)
@@ -521,8 +567,8 @@ async def main():
     adam_params = tinker.AdamParams(learning_rate=LEARNING_RATE, beta1=0.9, beta2=0.95, eps=1e-08)
 
     service_client = tinker.ServiceClient()
-    training_client = await service_client.create_lora_training_client_async(
-        base_model=MODEL_NAME, rank=LORA_RANK
+    training_client = await service_client.create_training_client_from_state_with_optimizer_async(
+        TRAINING_CHECKPOINT_PATH
     )
     tinker_run_id = str(training_client.model_id)
     wandb_run = wandb.init(
@@ -532,16 +578,21 @@ async def main():
             "tinker_run_id": tinker_run_id,
             "model_name": MODEL_NAME,
             "renderer_name": RENDERER_NAME,
+            "training_checkpoint_path": TRAINING_CHECKPOINT_PATH,
             "group_size": GROUP_SIZE,
             "lora_rank": LORA_RANK,
             "max_tokens": MAX_TOKENS,
             "batch_size": BATCH_SIZE,
+            "start_step": START_STEP,
             "steps": STEPS,
             "learning_rate": LEARNING_RATE,
+            "rows": ROWS,
+            "cols": COLS,
+            "mines": MINES,
         },
     )
 
-    for step in range(STEPS):
+    for step in range(START_STEP, START_STEP + STEPS):
         print(f"STEP {step}")
 
         sampling_client = await training_client.save_weights_and_get_sampling_client_async()
@@ -549,11 +600,18 @@ async def main():
 
         traj_group_tasks = []
         for batch in range(BATCH_SIZE):
+            group_seed = step * BATCH_SIZE + batch
+            rng = random.Random(group_seed)
+            opening_cell = (rng.randrange(ROWS), rng.randrange(COLS))
             group_builder = ProblemGroupBuilder(
                 env_thunk=partial(
                     MinesweeperEnv,
                     renderer,
-                    seed=step * BATCH_SIZE + batch,
+                    rows=ROWS,
+                    cols=COLS,
+                    mines=MINES,
+                    seed=group_seed,
+                    opening_cell=opening_cell,
                 ),
                 num_envs=GROUP_SIZE,
             )
