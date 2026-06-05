@@ -25,7 +25,6 @@ PLAYING = "playing"
 WON = "won"
 LOST = "lost"
 TOOL_NAME = "play_minesweeper"
-INVALID_MOVE_REWARD = -0.1
 
 SYSTEM_PROMPT = """Play Minesweeper by calling reveal.
 
@@ -268,6 +267,7 @@ class Game:
 
     def invalid(self, message: str) -> str:
         self.invalid_commands += 1
+        self.status = LOST
         self.last_message = f"INVALID: {message}"
         return self.render()
 
@@ -431,7 +431,6 @@ class MinesweeperEnv(Env):
             invalid_commands_before = self.state.invalid_commands
             self.state.reveal(cell)
             if self.state.invalid_commands > invalid_commands_before:
-                reward += INVALID_MOVE_REWARD
                 invalid_moves += self.state.invalid_commands - invalid_commands_before
 
             tool_message = {
@@ -444,6 +443,9 @@ class MinesweeperEnv(Env):
             tool_tokens = render_message_tokens(self.renderer, tool_message, self.messages)
             tool_response_tokens.extend(tool_tokens)
             self.messages.append(tool_message)
+
+            if self.state.status != PLAYING:
+                break
 
 
         if self.state.status != PLAYING:
@@ -508,17 +510,17 @@ async def run_rollout(
 
 async def main():
     SAMPLER_CHECKPOINT_PATH = (
-        "tinker://b591491a-89d0-5750-a204-c74dc8058da1:train:0"
-        "/sampler_weights/sampler_step_000009"
+        "tinker://b3bd25a5-9d9e-5635-8284-45613f4dc1df:train:0"
+        "/sampler_weights/sampler_step_000010"
     )
     MODEL_NAME = "openai/gpt-oss-20b"
     RENDERER_NAME = "gpt_oss_medium_reasoning"
     NUM_ROLLOUTS = 32
     MAX_TOKENS = 8000
     FAILED_ROLLOUT_REWARD = -1.0
-    ROWS = 10
-    COLS = 10
-    MINES = 12
+    ROWS = 5
+    COLS = 5
+    MINES = 8
 
     tokenizer = get_tokenizer(MODEL_NAME)
     renderer = renderers.get_renderer(RENDERER_NAME, tokenizer=tokenizer)

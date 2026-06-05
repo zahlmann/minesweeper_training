@@ -35,7 +35,6 @@ PLAYING = "playing"
 WON = "won"
 LOST = "lost"
 TOOL_NAME = "play_minesweeper"
-INVALID_MOVE_REWARD = -0.1
 
 SYSTEM_PROMPT = """Play Minesweeper by calling reveal.
 
@@ -278,6 +277,7 @@ class Game:
 
     def invalid(self, message: str) -> str:
         self.invalid_commands += 1
+        self.status = LOST
         self.last_message = f"INVALID: {message}"
         return self.render()
 
@@ -472,7 +472,6 @@ class MinesweeperEnv(Env):
             invalid_commands_before = self.state.invalid_commands
             self.state.reveal(cell)
             if self.state.invalid_commands > invalid_commands_before:
-                reward += INVALID_MOVE_REWARD
                 invalid_moves += self.state.invalid_commands - invalid_commands_before
 
             tool_message = {
@@ -485,6 +484,9 @@ class MinesweeperEnv(Env):
             tool_tokens = render_message_tokens(self.renderer, tool_message, self.messages)
             tool_response_tokens.extend(tool_tokens)
             self.messages.append(tool_message)
+
+            if self.state.status != PLAYING:
+                break
 
 
         if self.state.status != PLAYING:
@@ -544,8 +546,8 @@ def mean_reward(traj_groups: list[TrajectoryGroup]) -> float:
 
 async def main():
     TRAINING_CHECKPOINT_PATH = (
-        "tinker://b591491a-89d0-5750-a204-c74dc8058da1:train:0"
-        "/weights/step_000009"
+        "tinker://b3bd25a5-9d9e-5635-8284-45613f4dc1df:train:0"
+        "/weights/step_000010"
     )
     MODEL_NAME = "openai/gpt-oss-20b"
     RENDERER_NAME = "gpt_oss_medium_reasoning"
@@ -553,7 +555,7 @@ async def main():
     LORA_RANK = 32
     MAX_TOKENS = 4000
     BATCH_SIZE = 128
-    START_STEP = 10
+    START_STEP = 11
     STEPS = 6
     LEARNING_RATE = 1e-4
     ROWS = 10
