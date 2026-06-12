@@ -510,17 +510,17 @@ async def run_rollout(
 
 async def main():
     SAMPLER_CHECKPOINT_PATH = (
-        "tinker://b3bd25a5-9d9e-5635-8284-45613f4dc1df:train:0"
-        "/sampler_weights/sampler_step_000010"
+        "tinker://b27e6b24-4d33-5238-b19d-be42b732158a:train:0"
+        "/sampler_weights/sampler_step_000011"
     )
     MODEL_NAME = "openai/gpt-oss-20b"
     RENDERER_NAME = "gpt_oss_medium_reasoning"
-    NUM_ROLLOUTS = 32
+    NUM_ROLLOUTS = 20
     MAX_TOKENS = 8000
     FAILED_ROLLOUT_REWARD = -1.0
-    ROWS = 5
-    COLS = 5
-    MINES = 8
+    ROWS = 8
+    COLS = 8
+    MINES = 10
 
     tokenizer = get_tokenizer(MODEL_NAME)
     renderer = renderers.get_renderer(RENDERER_NAME, tokenizer=tokenizer)
